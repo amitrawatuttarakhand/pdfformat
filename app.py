@@ -3,34 +3,82 @@ import streamlit as st
 from pypdf import PdfReader
 from weasyprint import HTML
 from groq import Groq
+from google import genai
+from google.genai import types
+from openai import OpenAI
 
 st.set_page_config(page_title="AI PDF Cloner & Generator", layout="wide")
 
-# 1. Groq Client Setup (Silently loaded from secrets/env)
-groq_api_key = st.secrets.get("GROQ_API_KEY", os.environ.get("GROQ_API_KEY", ""))
-client = Groq(api_key=groq_api_key) if groq_api_key else None
+# 1. Multi-Provider Client Setup
+groq_key = st.secrets.get("GROQ_API_KEY", os.environ.get("GROQ_API_KEY", ""))
+gemini_key = st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY", ""))
+openai_key = st.secrets.get("OPENAI_API_KEY", os.environ.get("OPENAI_API_KEY", ""))
 
-# Helper: Auto-fallback through active Groq models to prevent 404 NotFoundError
-def generate_groq_response(messages, temperature=0.2):
-    candidate_models = [
-        "llama-3.1-8b-instant",
-        "mixtral-8x7b-32768",
-        "gemma2-9b-it",
-        "llama3-8b-8192"
-    ]
+groq_client = Groq(api_key=groq_key) if groq_key else None
+gemini_client = genai.Client(api_key=gemini_key) if gemini_key else None
+openai_client = OpenAI(api_key=openai_key) if openai_key else None
+
+# Universal LLM caller across active free models
+def generate_llm_response(messages, system_prompt="", temperature=0.2):
     last_error = None
-    for model_name in candidate_models:
+
+    # Priority 1: Groq with active Llama 3.3 & Llama 3.1 production models
+    if groq_client:
+        groq_active_models = [
+            "llama-3.3-70b-versatile",
+            "llama-3.1-8b-instant",
+            "gemma2-9b-it"
+        ]
+        groq_msgs = []
+        if system_prompt:
+            groq_msgs.append({"role": "system", "content": system_prompt})
+        groq_msgs.extend(messages)
+
+        for model in groq_active_models:
+            try:
+                response = groq_client.chat.completions.create(
+                    messages=groq_msgs,
+                    model=model,
+                    temperature=temperature
+                )
+                return response.choices[0].message.content
+            except Exception as e:
+                last_error = e
+                continue
+
+    # Priority 2: Google Gemini Flash (Generous free tier)
+    if gemini_client:
         try:
-            chat_completion = client.chat.completions.create(
-                messages=messages,
-                model=model_name,
-                temperature=temperature,
+            full_prompt = f"{system_prompt}\n\n" if system_prompt else ""
+            for m in messages:
+                full_prompt += f"{m['role'].upper()}: {m['content']}\n"
+            
+            resp = gemini_client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=full_prompt
             )
-            return chat_completion.choices[0].message.content
+            return resp.text
         except Exception as e:
             last_error = e
-            continue
-    raise RuntimeError(f"All Groq model attempts failed. Last error: {last_error}")
+
+    # Priority 3: OpenAI / OpenRouter Fallback
+    if openai_client:
+        try:
+            oai_msgs = []
+            if system_prompt:
+                oai_msgs.append({"role": "system", "content": system_prompt})
+            oai_msgs.extend(messages)
+            
+            resp = openai_client.chat.completions.create(
+                messages=oai_msgs,
+                model="gpt-4o-mini",
+                temperature=temperature
+            )
+            return resp.choices[0].message.content
+        except Exception as e:
+            last_error = e
+
+    raise RuntimeError(f"No LLM provider succeeded. Please verify your API keys. Last error: {last_error}")
 
 # 2. Session State Initialization
 if "messages" not in st.session_state:
@@ -78,14 +126,14 @@ def extract_pdf_content(file):
 def generate_pdf(html_string):
     return HTML(string=html_string).write_pdf()
 
-# 4. Clean Sidebar (Upload & Extract)
+# 4. Sidebar: Upload & Extract
 with st.sidebar:
     st.header("📄 Upload Template PDF")
     uploaded_pdf = st.file_uploader("Upload reference PDF format", type=["pdf"])
 
     if uploaded_pdf and st.button("Extract Layout & Format", use_container_width=True):
-        if not client:
-            st.error("Groq API Key not found. Please set GROQ_API_KEY in Streamlit secrets.")
+        if not (groq_client or gemini_client or openai_client):
+            st.error("No API keys found. Set GROQ_API_KEY or GEMINI_API_KEY in secrets.")
         else:
             with st.spinner("Analyzing PDF format & layout..."):
                 try:
@@ -103,7 +151,7 @@ with st.sidebar:
                     {raw_text[:4000]}
                     """
 
-                    response_html = generate_groq_response(
+                    response_html = generate_llm_response(
                         messages=[{"role": "user", "content": extract_prompt}],
                         temperature=0.2
                     )
@@ -114,22 +162,20 @@ with st.sidebar:
                 except Exception as e:
                     st.error(f"Extraction error: {e}")
 
-# 5. Main Screen: Chat & Live Preview
+# 5. Main App: Chat & Live Preview
 col1, col2 = st.columns([1.1, 0.9])
 
 with col1:
     st.header("💬 Chat & Document Generator")
-    st.caption("Ask to create new topics (e.g. *'Make a PDF of Python in this format'*), summarize, or modify sections.")
+    st.caption("Ask to generate new topics (e.g. *'Make a PDF of Python in this format'*), summarize, or modify sections.")
 
-    # Render Chat History
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-    # Handle Chat Inputs
     if user_prompt := st.chat_input("E.g., Make a PDF of Python core concepts in this format..."):
-        if not client:
-            st.error("Groq API Key missing. Add GROQ_API_KEY to your Streamlit secrets.")
+        if not (groq_client or gemini_client or openai_client):
+            st.error("Missing API Key. Add GROQ_API_KEY or GEMINI_API_KEY to your Streamlit secrets.")
         else:
             st.session_state.messages.append({"role": "user", "content": user_prompt})
             with st.chat_message("user"):
@@ -150,7 +196,7 @@ with col1:
                         Instructions:
                         1. If the user asks for a summary, provide a clear, concise bulleted summary of the reference PDF.
                         2. If the user asks to create a new PDF on a new topic (e.g., 'Make a PDF of Python' or 'Make a resume for a Data Scientist') in the same format:
-                           - Generate high quality, comprehensive content for the requested topic.
+                           - Generate high-quality, comprehensive content for the requested topic.
                            - Map this new content into the exact HTML/CSS layout structure of the current template (same font styles, headers, colors, cards, tables, margins).
                            - Return your output in the following format:
                              [RESPONSE]
@@ -161,11 +207,9 @@ with col1:
                              [/HTML]
                         """
 
-                        reply = generate_groq_response(
-                            messages=[
-                                {"role": "system", "content": system_prompt},
-                                {"role": "user", "content": user_prompt}
-                            ],
+                        reply = generate_llm_response(
+                            messages=[{"role": "user", "content": user_prompt}],
+                            system_prompt=system_prompt,
                             temperature=0.3
                         )
 
@@ -186,7 +230,7 @@ with col1:
 with col2:
     st.header("📄 Live PDF Preview & Export")
 
-    # Live Render Container
+    # Live Render Preview
     st.components.v1.html(st.session_state.current_html, height=520, scrolling=True)
 
     # PDF Download Button
