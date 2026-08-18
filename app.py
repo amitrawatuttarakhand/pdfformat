@@ -6,9 +6,31 @@ from groq import Groq
 
 st.set_page_config(page_title="AI PDF Cloner & Generator", layout="wide")
 
-# 1. Groq Client Setup (Silently loaded in the background)
+# 1. Groq Client Setup (Silently loaded from secrets/env)
 groq_api_key = st.secrets.get("GROQ_API_KEY", os.environ.get("GROQ_API_KEY", ""))
 client = Groq(api_key=groq_api_key) if groq_api_key else None
+
+# Helper: Auto-fallback through active Groq models to prevent 404 NotFoundError
+def generate_groq_response(messages, temperature=0.2):
+    candidate_models = [
+        "llama-3.1-8b-instant",
+        "mixtral-8x7b-32768",
+        "gemma2-9b-it",
+        "llama3-8b-8192"
+    ]
+    last_error = None
+    for model_name in candidate_models:
+        try:
+            chat_completion = client.chat.completions.create(
+                messages=messages,
+                model=model_name,
+                temperature=temperature,
+            )
+            return chat_completion.choices[0].message.content
+        except Exception as e:
+            last_error = e
+            continue
+    raise RuntimeError(f"All Groq model attempts failed. Last error: {last_error}")
 
 # 2. Session State Initialization
 if "messages" not in st.session_state:
@@ -38,7 +60,7 @@ if "current_html" not in st.session_state:
         </div>
         <div class="section">
             <h2>Getting Started</h2>
-            <p>Upload any template PDF, then prompt: <em>"Make a PDF of Python in this same format"</em>.</p>
+            <p>Upload any template PDF on the left, then ask in chat: <em>"Make a PDF of Python in this same format"</em>.</p>
         </div>
     </body>
     </html>
@@ -56,118 +78,124 @@ def extract_pdf_content(file):
 def generate_pdf(html_string):
     return HTML(string=html_string).write_pdf()
 
-# 4. Clean Sidebar
+# 4. Clean Sidebar (Upload & Extract)
 with st.sidebar:
     st.header("📄 Upload Template PDF")
     uploaded_pdf = st.file_uploader("Upload reference PDF format", type=["pdf"])
 
     if uploaded_pdf and st.button("Extract Layout & Format", use_container_width=True):
         if not client:
-            st.error("Groq API Key not found in environment or secrets.")
+            st.error("Groq API Key not found. Please set GROQ_API_KEY in Streamlit secrets.")
         else:
-            with st.spinner("Analyzing PDF format & layout via Groq..."):
-                raw_text = extract_pdf_content(uploaded_pdf)
-                st.session_state.reference_text = raw_text
+            with st.spinner("Analyzing PDF format & layout..."):
+                try:
+                    raw_text = extract_pdf_content(uploaded_pdf)
+                    st.session_state.reference_text = raw_text
 
-                extract_prompt = f"""
-                Analyze the following text extracted from a reference PDF document. 
-                Identify its visual sections, typography hierarchy, tables, headers, footers, and layout structure.
-                Create a complete, single-file HTML document (with internal CSS in <style>) that visually recreates 
-                the exact same structure and design format. 
-                Return ONLY raw valid HTML code without markdown fences.
+                    extract_prompt = f"""
+                    Analyze the following text extracted from a reference PDF document. 
+                    Identify its visual sections, typography hierarchy, tables, headers, footers, and layout structure.
+                    Create a complete, single-file HTML document (with internal CSS inside <style>) that visually recreates 
+                    the exact same structure and design format. 
+                    Return ONLY raw valid HTML code without markdown fences.
 
-                Reference Document Content:
-                {raw_text[:4000]}
-                """
+                    Reference Document Content:
+                    {raw_text[:4000]}
+                    """
 
-                chat_completion = client.chat.completions.create(
-                    messages=[{"role": "user", "content": extract_prompt}],
-                    model="llama-3.3-70b-versatile",
-                    temperature=0.2,
-                )
-                
-                clean_html = chat_completion.choices[0].message.content.replace("```html", "").replace("```", "").strip()
-                st.session_state.current_html = clean_html
-                st.success("Template cloned successfully!")
+                    response_html = generate_groq_response(
+                        messages=[{"role": "user", "content": extract_prompt}],
+                        temperature=0.2
+                    )
 
-# 5. Main App: Chat & Live Preview
+                    clean_html = response_html.replace("```html", "").replace("```", "").strip()
+                    st.session_state.current_html = clean_html
+                    st.success("Template format extracted successfully!")
+                except Exception as e:
+                    st.error(f"Extraction error: {e}")
+
+# 5. Main Screen: Chat & Live Preview
 col1, col2 = st.columns([1.1, 0.9])
 
 with col1:
     st.header("💬 Chat & Document Generator")
-    st.caption("Instruct Groq to generate new topics (e.g. *'Make a PDF of Python in this format'*), summarize, or edit sections.")
+    st.caption("Ask to create new topics (e.g. *'Make a PDF of Python in this format'*), summarize, or modify sections.")
 
+    # Render Chat History
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-    if user_prompt := st.chat_input("E.g., Make a PDF of Python core concepts in the uploaded format..."):
+    # Handle Chat Inputs
+    if user_prompt := st.chat_input("E.g., Make a PDF of Python core concepts in this format..."):
         if not client:
-            st.error("Groq API Key is missing. Add GROQ_API_KEY to your Streamlit secrets.")
+            st.error("Groq API Key missing. Add GROQ_API_KEY to your Streamlit secrets.")
         else:
             st.session_state.messages.append({"role": "user", "content": user_prompt})
             with st.chat_message("user"):
                 st.markdown(user_prompt)
 
             with st.chat_message("assistant"):
-                with st.spinner("Processing with Groq..."):
-                    system_prompt = f"""
-                    You are an expert document design and PDF generator assistant.
-                    
-                    Current Reference PDF Extracted Content:
-                    {st.session_state.reference_text[:3000] if st.session_state.reference_text else "Standard clean technical report format."}
+                with st.spinner("Generating document..."):
+                    try:
+                        system_prompt = f"""
+                        You are an expert document design and PDF generator assistant.
+                        
+                        Current Reference PDF Extracted Content:
+                        {st.session_state.reference_text[:3000] if st.session_state.reference_text else "Standard clean technical report format."}
 
-                    Current HTML/CSS Template:
-                    {st.session_state.current_html}
+                        Current HTML/CSS Template:
+                        {st.session_state.current_html}
 
-                    Instructions:
-                    1. If the user asks for a summary, provide a clear, concise bulleted summary of the reference PDF.
-                    2. If the user asks to create a new PDF on a new topic (e.g., 'Make a PDF of Python' or 'Make a resume for a Data Scientist') in the same format:
-                       - Generate high-quality, comprehensive content for the requested topic.
-                       - Map this new content into the exact HTML/CSS layout structure of the current template (same font styles, headers, colors, cards, tables, margins).
-                       - Return your output in the following format:
-                         [RESPONSE]
-                         A friendly message explaining what you generated/updated.
-                         [/RESPONSE]
-                         [HTML]
-                         The complete updated HTML code (with internal CSS, printable on standard A4, ready for WeasyPrint).
-                         [/HTML]
-                    """
+                        Instructions:
+                        1. If the user asks for a summary, provide a clear, concise bulleted summary of the reference PDF.
+                        2. If the user asks to create a new PDF on a new topic (e.g., 'Make a PDF of Python' or 'Make a resume for a Data Scientist') in the same format:
+                           - Generate high quality, comprehensive content for the requested topic.
+                           - Map this new content into the exact HTML/CSS layout structure of the current template (same font styles, headers, colors, cards, tables, margins).
+                           - Return your output in the following format:
+                             [RESPONSE]
+                             A brief explanation of what was updated.
+                             [/RESPONSE]
+                             [HTML]
+                             The complete updated HTML code (with internal CSS, printable on standard A4, ready for WeasyPrint).
+                             [/HTML]
+                        """
 
-                    chat_completion = client.chat.completions.create(
-                        messages=[
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": user_prompt}
-                        ],
-                        model="llama-3.1-70b-versatile",  
-                        temperature=0.3,
-                    )
-                    
-                    reply = chat_completion.choices[0].message.content
+                        reply = generate_groq_response(
+                            messages=[
+                                {"role": "system", "content": system_prompt},
+                                {"role": "user", "content": user_prompt}
+                            ],
+                            temperature=0.3
+                        )
 
-                    if "[HTML]" in reply and "[/HTML]" in reply:
-                        chat_msg = reply.split("[HTML]")[0].replace("[RESPONSE]", "").replace("[/RESPONSE]", "").strip()
-                        new_html = reply.split("[HTML]")[1].split("[/HTML]")[0].replace("```html", "").replace("```", "").strip()
-                        st.session_state.current_html = new_html
-                    else:
-                        chat_msg = reply
+                        if "[HTML]" in reply and "[/HTML]" in reply:
+                            chat_msg = reply.split("[HTML]")[0].replace("[RESPONSE]", "").replace("[/RESPONSE]", "").strip()
+                            new_html = reply.split("[HTML]")[1].split("[/HTML]")[0].replace("```html", "").replace("```", "").strip()
+                            st.session_state.current_html = new_html
+                        else:
+                            chat_msg = reply
 
-                    st.markdown(chat_msg)
-                    st.session_state.messages.append({"role": "assistant", "content": chat_msg})
+                        st.markdown(chat_msg)
+                        st.session_state.messages.append({"role": "assistant", "content": chat_msg})
+                    except Exception as err:
+                        error_msg = f"Generation failed: {err}"
+                        st.error(error_msg)
+                        st.session_state.messages.append({"role": "assistant", "content": error_msg})
 
 with col2:
     st.header("📄 Live PDF Preview & Export")
 
-    # Render Preview
+    # Live Render Container
     st.components.v1.html(st.session_state.current_html, height=520, scrolling=True)
 
-    # Download Button
+    # PDF Download Button
     try:
         pdf_data = generate_pdf(st.session_state.current_html)
         st.download_button(
             label="📥 Download Generated PDF",
             data=pdf_data,
-            file_name="custom_document.pdf",
+            file_name="generated_document.pdf",
             mime="application/pdf",
             type="primary",
             use_container_width=True
