@@ -2,14 +2,13 @@ import os
 import streamlit as st
 from pypdf import PdfReader
 from weasyprint import HTML
-from google import genai
-from google.genai import types
+from groq import Groq
 
 st.set_page_config(page_title="AI PDF Cloner & Generator", layout="wide")
 
-# 1. API Client Setup (Loaded silently in background)
-api_key = st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY", ""))
-client = genai.Client(api_key=api_key) if api_key else None
+# 1. Groq Client Setup (Silently loaded in the background)
+groq_api_key = st.secrets.get("GROQ_API_KEY", os.environ.get("GROQ_API_KEY", ""))
+client = Groq(api_key=groq_api_key) if groq_api_key else None
 
 # 2. Session State Initialization
 if "messages" not in st.session_state:
@@ -57,16 +56,16 @@ def extract_pdf_content(file):
 def generate_pdf(html_string):
     return HTML(string=html_string).write_pdf()
 
-# 4. Clean Sidebar (Only Upload and Extract)
+# 4. Clean Sidebar
 with st.sidebar:
     st.header("📄 Upload Template PDF")
     uploaded_pdf = st.file_uploader("Upload reference PDF format", type=["pdf"])
 
     if uploaded_pdf and st.button("Extract Layout & Format", use_container_width=True):
         if not client:
-            st.error("API Key not found in environment or secrets.")
+            st.error("Groq API Key not found in environment or secrets.")
         else:
-            with st.spinner("Analyzing PDF format & layout..."):
+            with st.spinner("Analyzing PDF format & layout via Groq..."):
                 raw_text = extract_pdf_content(uploaded_pdf)
                 st.session_state.reference_text = raw_text
 
@@ -80,11 +79,14 @@ with st.sidebar:
                 Reference Document Content:
                 {raw_text[:4000]}
                 """
-                response = client.models.generate_content(
-                    model="gemini-2.5-flash",
-                    contents=extract_prompt
+
+                chat_completion = client.chat.completions.create(
+                    messages=[{"role": "user", "content": extract_prompt}],
+                    model="llama-3.3-70b-versatile",
+                    temperature=0.2,
                 )
-                clean_html = response.text.replace("```html", "").replace("```", "").strip()
+                
+                clean_html = chat_completion.choices[0].message.content.replace("```html", "").replace("```", "").strip()
                 st.session_state.current_html = clean_html
                 st.success("Template cloned successfully!")
 
@@ -93,7 +95,7 @@ col1, col2 = st.columns([1.1, 0.9])
 
 with col1:
     st.header("💬 Chat & Document Generator")
-    st.caption("Instruct the AI to generate new topics (e.g. *'Make a PDF of Python in this format'*), summarize, or edit fields.")
+    st.caption("Instruct Groq to generate new topics (e.g. *'Make a PDF of Python in this format'*), summarize, or edit sections.")
 
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
@@ -101,14 +103,14 @@ with col1:
 
     if user_prompt := st.chat_input("E.g., Make a PDF of Python core concepts in the uploaded format..."):
         if not client:
-            st.error("API Key is missing. Add GEMINI_API_KEY to your Streamlit secrets.")
+            st.error("Groq API Key is missing. Add GROQ_API_KEY to your Streamlit secrets.")
         else:
             st.session_state.messages.append({"role": "user", "content": user_prompt})
             with st.chat_message("user"):
                 st.markdown(user_prompt)
 
             with st.chat_message("assistant"):
-                with st.spinner("Updating document..."):
+                with st.spinner("Processing with Groq..."):
                     system_prompt = f"""
                     You are an expert document design and PDF generator assistant.
                     
@@ -121,7 +123,7 @@ with col1:
                     Instructions:
                     1. If the user asks for a summary, provide a clear, concise bulleted summary of the reference PDF.
                     2. If the user asks to create a new PDF on a new topic (e.g., 'Make a PDF of Python' or 'Make a resume for a Data Scientist') in the same format:
-                       - Generate high quality, comprehensive content for the requested topic.
+                       - Generate high-quality, comprehensive content for the requested topic.
                        - Map this new content into the exact HTML/CSS layout structure of the current template (same font styles, headers, colors, cards, tables, margins).
                        - Return your output in the following format:
                          [RESPONSE]
@@ -132,14 +134,16 @@ with col1:
                          [/HTML]
                     """
 
-                    response = client.models.generate_content(
-                        model="gemini-2.5-flash",
-                        contents=[
-                            types.Content(role="user", parts=[types.Part.from_text(text=f"{system_prompt}\n\nUser Request: {user_prompt}")])
-                        ]
+                    chat_completion = client.chat.completions.create(
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt}
+                        ],
+                        model="llama-3.3-70b-versatile",
+                        temperature=0.3,
                     )
                     
-                    reply = response.text
+                    reply = chat_completion.choices[0].message.content
 
                     if "[HTML]" in reply and "[/HTML]" in reply:
                         chat_msg = reply.split("[HTML]")[0].replace("[RESPONSE]", "").replace("[/RESPONSE]", "").strip()
