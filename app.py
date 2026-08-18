@@ -139,7 +139,7 @@ with col1:
                             {"role": "system", "content": system_prompt},
                             {"role": "user", "content": user_prompt}
                         ],
-                        model="llama-3.3-70b-versatile",
+                        model="llama-3.1-70b-versatile",  
                         temperature=0.3,
                     )
                     
