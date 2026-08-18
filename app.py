@@ -7,17 +7,8 @@ from google.genai import types
 
 st.set_page_config(page_title="AI PDF Cloner & Generator", layout="wide")
 
-# 1. API Client Setup
+# 1. API Client Setup (Loaded silently in background)
 api_key = st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY", ""))
-
-with st.sidebar:
-    st.header("⚙️ Configuration")
-    if not api_key:
-        api_key = st.text_input("Enter Gemini API Key", type="password")
-
-    st.header("📄 1. Upload Template PDF")
-    uploaded_pdf = st.file_uploader("Upload reference PDF format", type=["pdf"])
-
 client = genai.Client(api_key=api_key) if api_key else None
 
 # 2. Session State Initialization
@@ -44,11 +35,11 @@ if "current_html" not in st.session_state:
     <body>
         <div class="header">
             <h1>Document Preview</h1>
-            <div class="subtitle">Upload a PDF format on the left to clone its layout.</div>
+            <div class="subtitle">Upload a reference PDF to clone its layout structure.</div>
         </div>
         <div class="section">
             <h2>Getting Started</h2>
-            <p>Upload any reference PDF, then chat: <em>"Make a PDF of Python in this same format"</em>.</p>
+            <p>Upload any template PDF, then prompt: <em>"Make a PDF of Python in this same format"</em>.</p>
         </div>
     </body>
     </html>
@@ -66,57 +57,58 @@ def extract_pdf_content(file):
 def generate_pdf(html_string):
     return HTML(string=html_string).write_pdf()
 
-# Process Uploaded PDF
-if uploaded_pdf and st.sidebar.button("Extract Layout & Format"):
-    with st.spinner("Analyzing PDF format and styling..."):
-        raw_text = extract_pdf_content(uploaded_pdf)
-        st.session_state.reference_text = raw_text
+# 4. Clean Sidebar (Only Upload and Extract)
+with st.sidebar:
+    st.header("📄 Upload Template PDF")
+    uploaded_pdf = st.file_uploader("Upload reference PDF format", type=["pdf"])
 
-        if client:
-            # Generate initial cloned HTML template from the uploaded PDF
-            extract_prompt = f"""
-            Analyze the following text extracted from a reference PDF document. 
-            Identify its visual sections, typography hierarchy, tables, headers, footers, and layout structure.
-            Create a complete, single-file HTML document (with internal CSS in <style>) that visually recreates 
-            the exact same structure and design format. 
-            Return ONLY raw valid HTML code without markdown fences.
-
-            Reference Document Content:
-            {raw_text[:4000]}
-            """
-            response = client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=extract_prompt
-            )
-            clean_html = response.text.replace("```html", "").replace("```", "").strip()
-            st.session_state.current_html = clean_html
-            st.sidebar.success("Template cloned successfully!")
+    if uploaded_pdf and st.button("Extract Layout & Format", use_container_width=True):
+        if not client:
+            st.error("API Key not found in environment or secrets.")
         else:
-            st.sidebar.warning("Please provide an API key to enable AI layout cloning.")
+            with st.spinner("Analyzing PDF format & layout..."):
+                raw_text = extract_pdf_content(uploaded_pdf)
+                st.session_state.reference_text = raw_text
 
-# 4. Main App Layout (Chat on Left, Live PDF Preview on Right)
+                extract_prompt = f"""
+                Analyze the following text extracted from a reference PDF document. 
+                Identify its visual sections, typography hierarchy, tables, headers, footers, and layout structure.
+                Create a complete, single-file HTML document (with internal CSS in <style>) that visually recreates 
+                the exact same structure and design format. 
+                Return ONLY raw valid HTML code without markdown fences.
+
+                Reference Document Content:
+                {raw_text[:4000]}
+                """
+                response = client.models.generate_content(
+                    model="gemini-2.5-flash",
+                    contents=extract_prompt
+                )
+                clean_html = response.text.replace("```html", "").replace("```", "").strip()
+                st.session_state.current_html = clean_html
+                st.success("Template cloned successfully!")
+
+# 5. Main App: Chat & Live Preview
 col1, col2 = st.columns([1.1, 0.9])
 
 with col1:
     st.header("💬 Chat & Document Generator")
-    st.caption("Ask to create new topics (e.g. *'Make a PDF of Python in this format'*), summarize, or update details.")
+    st.caption("Instruct the AI to generate new topics (e.g. *'Make a PDF of Python in this format'*), summarize, or edit fields.")
 
-    # Render Chat History
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-    # User Chat Input
     if user_prompt := st.chat_input("E.g., Make a PDF of Python core concepts in the uploaded format..."):
         if not client:
-            st.error("Please add your Gemini API Key in the sidebar or `.streamlit/secrets.toml`.")
+            st.error("API Key is missing. Add GEMINI_API_KEY to your Streamlit secrets.")
         else:
             st.session_state.messages.append({"role": "user", "content": user_prompt})
             with st.chat_message("user"):
                 st.markdown(user_prompt)
 
             with st.chat_message("assistant"):
-                with st.spinner("Processing request..."):
+                with st.spinner("Updating document..."):
                     system_prompt = f"""
                     You are an expert document design and PDF generator assistant.
                     
@@ -149,7 +141,6 @@ with col1:
                     
                     reply = response.text
 
-                    # Parse output tags if new HTML is generated
                     if "[HTML]" in reply and "[/HTML]" in reply:
                         chat_msg = reply.split("[HTML]")[0].replace("[RESPONSE]", "").replace("[/RESPONSE]", "").strip()
                         new_html = reply.split("[HTML]")[1].split("[/HTML]")[0].replace("```html", "").replace("```", "").strip()
